@@ -1,6 +1,6 @@
 ---
 name: adscrawl-browser
-description: Read, capture, or interact with browser-rendered websites through AdsCrawl. Use when an AI agent needs to extract a page as Markdown, structured article JSON, or HTML; capture a viewport or full-page PNG screenshot; or create a remote CDP browser session for multi-step interaction, JavaScript-heavy applications, login flows, Playwright, Puppeteer, Selenium, or browser debugging.
+description: Read, capture, or interact with browser-rendered websites through AdsCrawl. Use to extract Markdown, article JSON, or HTML; capture PNG screenshots; control temporary remote CDP sessions; or create, list, inspect, start with a custom proxy, and stop persistent cloud browser profiles.
 ---
 
 # AdsCrawl Browser
@@ -25,6 +25,9 @@ Never place API keys, CDP tokens, cookies, or proxy credentials in code, commits
 | Read, summarize, extract, or inspect rendered content | `POST /html` | Markdown, Readability JSON, or HTML |
 | Capture, archive, or visually verify a page | `POST /screenshot` | PNG image |
 | Click, type, log in, debug, or run multiple browser steps | `POST /cdp/sessions` | Remote CDP session |
+| Save and reuse a cloud browser profile across runs | `/cloud-browsers` | Persistent profile with a separate start/stop lifecycle |
+
+For persistent profiles, read [Cloud browser lifecycle](references/cloud-browsers.md) for the full API contract, errors, quotas, and executable create → start → query → stop example. Temporary `/cdp/sessions` sessions remain a separate workflow; do not use their create/delete endpoints to manage a persistent profile.
 
 For `/html` and `/screenshot`:
 
@@ -85,7 +88,7 @@ curl --fail-with-body -sS -X POST "$BASE_URL/screenshot" \
 
 ## Control a remote browser
 
-Use CDP only for multi-step or stateful work. CDP `browserSettings` accepts viewport, locale, timezone, geolocation, cookies, a custom `userAgent`, and a custom `proxy`; it does not use the managed HTTP `countryCode` or random User-Agent fields.
+Use temporary CDP for multi-step work that does not require a saved cloud browser profile. CDP `browserSettings` accepts viewport, locale, timezone, geolocation, cookies, a custom `userAgent`, and a custom `proxy`; it does not use the managed HTTP `countryCode` or random User-Agent fields.
 
 Create a session:
 
@@ -126,10 +129,20 @@ curl --fail-with-body -sS -X DELETE "$BASE_URL/cdp/sessions/SESSION_ID" \
   -H "x-api-key: $ADSCRAWL_API_KEY"
 ```
 
+## Manage a persistent cloud browser
+
+- Send `X-API-Key` on create, list, detail, start, and stop requests. The authenticated key is the billing key; omit `apiKeyId` (if supplied, it must match that key's ID).
+- Create saves a configuration and returns `201 {ok:true,id}`; it does not start a browser. Use `POST /cloud-browsers/{id}/start` to run it, then `/stop` to stop it while retaining the profile.
+- Every API start must explicitly send a valid `proxy` object in that request, including restarts. Saved or historical proxies and `countryCode` cannot replace it. Never fall back to direct or managed routing. Use `http://host:port` or `socks5://host:port`; provide `username` and `password` together or omit both.
+- Page session/Bearer authentication can select a custom proxy or an explicit managed `countryCode` (`GLOBAL` for a randomly selected available country). Never send `countryCode` and `proxy` together. PATCH/DELETE profiles and Viewer access remain page session/Bearer only.
+- Start requires an active paid plan and credits. Read list fields `runningLimit` and `runningCount` for the user-wide quota shared by page and API; `starting`, `running`, and `stopping` all count. The older `limit` field is the number of saved profiles allowed, not running capacity.
+- Start returns `200` only after `running`. Stop can return `202 stopping`; poll detail's top-level `runtime.status` until `stopped`, with a finite deadline. A timeout or failed stop does not confirm cleanup or release capacity. Inspect status before retrying an uncertain start; retry stop on the same profile when needed.
+- Use [scripts/cloud_browser.py](scripts/cloud_browser.py) for lifecycle calls with bounded stop polling and output that omits cookies, proxy credentials, and token-bearing URLs. Its commands and environment inputs are documented in the lifecycle reference. Always stop an instance started for the task, including on task failure, and report any unconfirmed cleanup.
+
 ## Handle failures
 
 1. Preserve the HTTP status and safe error body.
-2. Treat `400` as invalid or conflicting parameters, `401` as authentication failure, `429` as a CDP session limit, `503` as unavailable capacity or routing, and `504` as task timeout.
+2. Treat `400` as invalid or conflicting parameters, `401` as authentication failure, `429` as a temporary CDP session limit, `503` as unavailable capacity or routing, and `504` as task timeout. For persistent cloud browsers, use the [lifecycle error table](references/cloud-browsers.md#errors-and-recovery), including `402` billing failures and `409` running-quota or lifecycle conflicts.
 3. Retry at most once only when a different navigation strategy can reasonably help.
 4. Report the failing workflow, status, and safe error message without exposing secrets.
 5. Close any CDP session before returning an error.
